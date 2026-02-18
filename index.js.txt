@@ -1,0 +1,295 @@
+const express = require("express");
+const session = require("express-session");
+const bcrypt = require("bcrypt");
+const sqlite3 = require("sqlite3").verbose();
+const multer = require("multer");
+
+const app = express();
+const db = new sqlite3.Database("database.sqlite");
+const upload = multer({ dest: "uploads/" });
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static("."));
+app.use(session({
+  secret: "arabicSiteSecret",
+  resave: false,
+  saveUninitialized: true
+}));
+
+/* ================== قاعدة البيانات ================== */
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE,
+      email TEXT UNIQUE,
+      password TEXT,
+      role TEXT,
+      reset_code TEXT
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS contents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT,
+      body TEXT,
+      category TEXT,
+      image TEXT,
+      visible INTEGER DEFAULT 1
+    )
+  `);
+});
+
+/* ================== إنشاء الأدمن ================== */
+(async () => {
+  db.get("SELECT * FROM users WHERE username='Saoud'", async (err, user) => {
+    if (!user) {
+      const hash = await bcrypt.hash("12345", 10);
+      db.run(
+        "INSERT INTO users (username,email,password,role) VALUES (?,?,?,?)",
+        ["Saoud", "admin@site.com", hash, "admin"]
+      );
+    }
+  });
+})();
+
+/* ================== أدوات ================== */
+function كلمة_مرور_قوية(p) {
+  return p.length >= 8 && /\d/.test(p) && /[A-Za-z]/.test(p);
+}
+
+function صفحة(content) {
+  return `
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<title>موسوعة إسلامية</title>
+<style>
+body{
+  margin:0;
+  font-family:tahoma;
+  background:#0b3d2e;
+  color:#f5d76e;
+}
+.watermark{
+  position:fixed;
+  top:40%;
+  left:10%;
+  font-size:60px;
+  opacity:0.05;
+  transform:rotate(-30deg);
+}
+.container{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(250px,1fr));
+  gap:15px;
+  padding:20px;
+}
+.box{
+  background:#124734;
+  border:2px solid #f5d76e;
+  padding:15px;
+}
+a,button{
+  background:#f5d76e;
+  color:#0b3d2e;
+  padding:6px 12px;
+  text-decoration:none;
+  border:none;
+  cursor:pointer;
+  margin:2px;
+}
+input,textarea,select{
+  width:100%;
+  margin-bottom:6px;
+}
+img{
+  max-width:100%;
+}
+</style>
+</head>
+<body>
+<div class="watermark">Fatimid Ismailis</div>
+${content}
+</body>
+</html>
+`;
+}
+
+/* ================== الصفحة الرئيسية ================== */
+app.get("/", (req, res) => {
+  db.all("SELECT * FROM contents WHERE visible=1", (e, rows) => {
+    res.send(صفحة(`
+      <div class="container">
+        <div class="box">
+          <h3>القائمة</h3>
+          <a href="/login">تسجيل الدخول</a>
+          <a href="/register">إنشاء حساب</a>
+          ${req.session.user?.role === "admin" ? `<a href="/admin">لوحة الإدارة</a>` : ""}
+          ${req.session.user ? `<a href="/logout">تسجيل الخروج</a>` : ""}
+        </div>
+
+        ${rows.map(r => `
+          <div class="box">
+            <h3>${r.title}</h3>
+            ${r.image ? `<img src="${r.image}">` : ""}
+            <p>${r.body}</p>
+            <small>التصنيف: ${r.category}</small>
+          </div>
+        `).join("")}
+      </div>
+    `));
+  });
+});
+
+/* ================== تسجيل ================== */
+app.get("/register", (req, res) => {
+  res.send(صفحة(`
+    <form class="box" method="post">
+      <h3>إنشاء حساب جديد</h3>
+      <input name="username" placeholder="اسم المستخدم" required>
+      <input name="email" placeholder="البريد الإلكتروني" required>
+      <input type="password" name="password" placeholder="كلمة المرور" required>
+      <button>تسجيل</button>
+    </form>
+  `));
+});
+
+app.post("/register", async (req, res) => {
+  if (!كلمة_مرور_قوية(req.body.password))
+    return res.send("❌ كلمة المرور ضعيفة (8 أحرف + رقم + حرف)");
+
+  const hash = await bcrypt.hash(req.body.password, 10);
+  db.run(
+    "INSERT INTO users (username,email,password,role) VALUES (?,?,?,?)",
+    [req.body.username, req.body.email, hash, "user"],
+    () => res.redirect("/login")
+  );
+});
+
+/* ================== دخول ================== */
+app.get("/login", (req, res) => {
+  res.send(صفحة(`
+    <form class="box" method="post">
+      <h3>تسجيل الدخول</h3>
+      <input name="username" placeholder="اسم المستخدم">
+      <input type="password" name="password" placeholder="كلمة المرور">
+      <button>دخول</button>
+      <a href="/forgot">نسيت كلمة المرور؟</a>
+    </form>
+  `));
+});
+
+app.post("/login", (req, res) => {
+  db.get("SELECT * FROM users WHERE username=?", [req.body.username], async (e, u) => {
+    if (u && await bcrypt.compare(req.body.password, u.password)) {
+      req.session.user = u;
+      res.redirect("/");
+    } else {
+      res.send("❌ بيانات الدخول غير صحيحة");
+    }
+  });
+});
+
+/* ================== نسيت كلمة المرور ================== */
+app.get("/forgot", (req, res) => {
+  res.send(صفحة(`
+    <form class="box" method="post">
+      <h3>استرجاع كلمة المرور</h3>
+      <input name="email" placeholder="البريد الإلكتروني">
+      <button>إرسال الرمز</button>
+    </form>
+  `));
+});
+
+app.post("/forgot", (req, res) => {
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  db.run(
+    "UPDATE users SET reset_code=? WHERE email=?",
+    [code, req.body.email],
+    () => res.send(`رمز الاسترجاع: <b>${code}</b> <br><a href="/reset">تغيير كلمة المرور</a>`)
+  );
+});
+
+app.get("/reset", (req, res) => {
+  res.send(صفحة(`
+    <form class="box" method="post">
+      <input name="code" placeholder="رمز الاسترجاع">
+      <input name="password" placeholder="كلمة مرور جديدة">
+      <button>تغيير</button>
+    </form>
+  `));
+});
+
+app.post("/reset", async (req, res) => {
+  if (!كلمة_مرور_قوية(req.body.password))
+    return res.send("❌ كلمة المرور ضعيفة");
+
+  const hash = await bcrypt.hash(req.body.password, 10);
+  db.run(
+    "UPDATE users SET password=?, reset_code=NULL WHERE reset_code=?",
+    [hash, req.body.code],
+    () => res.redirect("/login")
+  );
+});
+
+/* ================== لوحة الأدمن ================== */
+app.get("/admin", (req, res) => {
+  if (req.session.user?.role !== "admin") return res.redirect("/login");
+
+  db.all("SELECT * FROM users", (e, users) => {
+    db.all("SELECT * FROM contents", (e2, contents) => {
+      res.send(صفحة(`
+        <div class="container">
+
+          <div class="box">
+            <h3>إضافة محتوى</h3>
+            <form method="post" enctype="multipart/form-data" action="/add">
+              <input name="title" placeholder="العنوان">
+              <textarea name="body" placeholder="المحتوى"></textarea>
+              <input name="category" placeholder="التصنيف">
+              <input type="file" name="image">
+              <button>إضافة</button>
+            </form>
+          </div>
+
+          <div class="box">
+            <h3>المستخدمون</h3>
+            ${users.map(u => `${u.username} (${u.role})`).join("<br>")}
+          </div>
+
+          <div class="box">
+            <h3>المحتوى</h3>
+            ${contents.map(c => `
+              ${c.title}
+              <a href="/hide/${c.id}">إخفاء</a>
+            `).join("<br>")}
+          </div>
+
+        </div>
+      `);
+    });
+  });
+});
+
+app.post("/add", upload.single("image"), (req, res) => {
+  db.run(
+    "INSERT INTO contents (title,body,category,image) VALUES (?,?,?,?)",
+    [req.body.title, req.body.body, req.body.category, req.file?.path],
+    () => res.redirect("/admin")
+  );
+});
+
+app.get("/hide/:id", (req, res) => {
+  db.run("UPDATE contents SET visible=0 WHERE id=?", [req.params.id], () => {
+    res.redirect("/admin");
+  });
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => res.redirect("/"));
+});
+
+app.listen(3000, () => console.log("الموقع يعمل"));
